@@ -1,0 +1,87 @@
+package websocket
+
+import (
+	"log"
+	"net/http"
+	"sync"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	gws "github.com/gorilla/websocket"
+)
+
+var upgrader = gws.Upgrader{
+	ReadBufferSize:  4096,
+	WriteBufferSize: 4096,
+	// Allow all origins during development; restrict in production.
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+// Handler manages WebSocket upgrades and active sessions.
+type Handler struct {
+	mu       sync.RWMutex
+	sessions map[string]*Session
+}
+
+func NewHandler() *Handler {
+	return &Handler{
+		sessions: make(map[string]*Session),
+	}
+}
+
+// ServeHTTP upgrades an HTTP request to a WebSocket connection.
+func (h *Handler) ServeHTTP(c *gin.Context) {
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Printf("ws upgrade failed: %v", err)
+		return
+	}
+
+	sessionID := uuid.New().String()
+	sess := newSession(sessionID, conn)
+
+	h.mu.Lock()
+	h.sessions[sessionID] = sess
+	h.mu.Unlock()
+
+	log.Printf("[%s] connected (active: %d)", sessionID, h.activeCount())
+
+	go h.readLoop(sess)
+}
+
+func (h *Handler) readLoop(sess *Session) {
+	defer func() {
+		sess.conn.Close()
+		close(sess.done)
+
+		h.mu.Lock()
+		delete(h.sessions, sess.ID)
+		h.mu.Unlock()
+
+		log.Printf("[%s] disconnected (active: %d)", sess.ID, h.activeCount())
+	}()
+
+	for {
+		msgType, data, err := sess.conn.ReadMessage()
+		if err != nil {
+			if gws.IsUnexpectedCloseError(err, gws.CloseGoingAway, gws.CloseNormalClosure) {
+				log.Printf("[%s] read error: %v", sess.ID, err)
+			}
+			return
+		}
+
+		if msgType != gws.BinaryMessage {
+			log.Printf("[%s] unexpected message type %d, ignoring", sess.ID, msgType)
+			continue
+		}
+
+		sess.appendChunk(data)
+		log.Printf("[%s] chunk %d bytes | buffer %d bytes", sess.ID, len(data), sess.TotalBuffered())
+	}
+}
+
+func (h *Handler) activeCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.sessions)
+}
