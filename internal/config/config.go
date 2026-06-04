@@ -3,7 +3,10 @@ package config
 import "os"
 
 type Config struct {
-	Port string
+	Port               string
+	RabbitMQURL        string
+	RabbitMQEmotionQ   string
+	RabbitMQSTTQ       string
 }
 
 func Load() *Config {
@@ -11,5 +14,26 @@ func Load() *Config {
 	if port == "" {
 		port = "8080"
 	}
-	return &Config{Port: port}
+
+	rabbitURL := os.Getenv("RABBITMQ_URL")
+	if rabbitURL == "" {
+		rabbitURL = "amqp://guest:guest@localhost:5672/"
+	}
+
+	emotionQueue := os.Getenv("RABBITMQ_EMOTION_QUEUE")
+	if emotionQueue == "" {
+		emotionQueue = "todai.worker.emotion"
+	}
+
+	sttQueue := os.Getenv("RABBITMQ_STT_QUEUE")
+	if sttQueue == "" {
+		sttQueue = "todai.worker.stt"
+	}
+
+	return &Config{
+		Port:             port,
+		RabbitMQURL:      rabbitURL,
+		RabbitMQEmotionQ: emotionQueue,
+		RabbitMQSTTQ:     sttQueue,
+	}
 }
