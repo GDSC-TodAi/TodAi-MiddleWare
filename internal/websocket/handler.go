@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"sync"
@@ -19,13 +20,20 @@ var upgrader = gws.Upgrader{
 
 // Handler manages WebSocket upgrades and active sessions.
 type Handler struct {
-	mu       sync.RWMutex
-	sessions map[string]*Session
+	mu           sync.RWMutex
+	sessions     map[string]*Session
+	audioHandler AudioChunkHandler
 }
 
-func NewHandler() *Handler {
+// AudioChunkHandler receives binary audio without exposing processing policy to WebSocket.
+type AudioChunkHandler interface {
+	HandleAudioChunk(ctx context.Context, sessionID string, audioData []byte)
+}
+
+func NewHandler(audioHandler AudioChunkHandler) *Handler {
 	return &Handler{
-		sessions: make(map[string]*Session),
+		sessions:     make(map[string]*Session),
+		audioHandler: audioHandler,
 	}
 }
 
@@ -75,8 +83,10 @@ func (h *Handler) readLoop(sess *Session) {
 			continue
 		}
 
-		sess.appendChunk(data)
-		log.Printf("[%s] chunk %d bytes | buffer %d bytes", sess.ID, len(data), sess.TotalBuffered())
+		log.Printf("[%s] audio chunk received | %d bytes", sess.ID, len(data))
+		if h.audioHandler != nil {
+			h.audioHandler.HandleAudioChunk(context.Background(), sess.ID, data)
+		}
 	}
 }
 
