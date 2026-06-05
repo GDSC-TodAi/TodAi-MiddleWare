@@ -30,35 +30,25 @@ func NewService(publisher Publisher) *Service {
 	}
 }
 
-// HandleAudioChunk temporarily treats each received chunk as a publish unit.
-// TODO: Replace this entry point with utterance-level audio after VAD and
-// utterance assembly policies are finalized.
-func (s *Service) HandleAudioChunk(ctx context.Context, sessionID string, audioData []byte) {
-	if s == nil || s.publisher == nil {
-		log.Printf("[%s] slow track publisher not configured, skipping audio chunk", sessionID)
-		return
-	}
-
-	audioCopy := append([]byte(nil), audioData...)
+// PublishUtterance sends a complete spoken utterance to both Python workers via RabbitMQ.
+// Called by the orchestrator after VAD confirms utterance end.
+func (s *Service) PublishUtterance(ctx context.Context, sessionID string, audioData []byte) {
 	req := model.WorkerRequest{
 		SessionID:     sessionID,
 		CorrelationID: uuid.New().String(),
-		ReplyTo:       "", // TODO: set when reply queue/aggregator is implemented.
-		AudioData:     audioCopy,
+		ReplyTo:       "", // TODO: set when aggregator is implemented (step 5).
+		AudioData:     audioData,
 		Timestamp:     time.Now().UnixMilli(),
 	}
 
-	go s.publish(context.WithoutCancel(ctx), req)
-}
-
-func (s *Service) publish(parent context.Context, req model.WorkerRequest) {
-	ctx, cancel := context.WithTimeout(parent, s.publishTimeout)
+	pubCtx, cancel := context.WithTimeout(ctx, s.publishTimeout)
 	defer cancel()
 
-	if err := s.publisher.PublishToWorkers(ctx, req); err != nil {
-		log.Printf("[%s] slow track publish failed: %v", req.SessionID, err)
+	if err := s.publisher.PublishToWorkers(pubCtx, req); err != nil {
+		log.Printf("[%s] slow track publish failed: %v", sessionID, err)
 		return
 	}
 
-	log.Printf("[%s] slow track chunk published | correlation_id %s", req.SessionID, req.CorrelationID)
+	log.Printf("[%s] utterance published | correlation_id=%s size=%d bytes",
+		sessionID, req.CorrelationID, len(audioData))
 }

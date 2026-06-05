@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>TodAi WebSocket 테스트</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
+    button { padding: 8px 16px; margin: 4px; cursor: pointer; border: none; border-radius: 4px; font-size: 14px; }
+    #btnConnect    { background: #0e639c; color: white; }
+    #btnDisconnect { background: #6c3b3b; color: white; }
+    #btnMic        { background: #3b6c3b; color: white; }
+    #btnStop       { background: #6c6c3b; color: white; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    #log { margin-top: 16px; padding: 12px; background: #111; border-radius: 4px;
+           height: 400px; overflow-y: auto; font-size: 13px; line-height: 1.6; }
+    .info  { color: #9cdcfe; }
+    .ok    { color: #4ec9b0; }
+    .error { color: #f44747; }
+    .chunk { color: #ce9178; }
+    #stats { margin-top: 8px; font-size: 13px; color: #858585; }
+  </style>
+</head>
+<body>
+  <h2>TodAi WebSocket 테스트 클라이언트</h2>
+
+  <div>
+    <input id="url" value="ws://localhost:8080/ws" style="width:300px; padding:6px; background:#2d2d2d; color:#d4d4d4; border:1px solid #555; border-radius:4px;">
+    <button id="btnConnect">연결</button>
+    <button id="btnDisconnect" disabled>연결 끊기</button>
+  </div>
+
+  <div style="margin-top:10px;">
+    <button id="btnMic" disabled>마이크 시작</button>
+    <button id="btnStop" disabled>마이크 중지</button>
+  </div>
+
+  <div id="stats">청크: 0개 | 총 전송: 0 bytes</div>
+  <div id="log"></div>
+
+  <script>
+    let ws = null;
+    let audioCtx = null;
+    let processor = null;
+    let source = null;
+    let chunkCount = 0;
+    let totalBytes = 0;
+
+    const log = (msg, cls = 'info') => {
+      const el = document.getElementById('log');
+      const line = document.createElement('div');
+      line.className = cls;
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      el.appendChild(line);
+      el.scrollTop = el.scrollHeight;
+    };
+
+    const updateStats = () => {
+      document.getElementById('stats').textContent =
+        `청크: ${chunkCount}개 | 총 전송: ${totalBytes.toLocaleString()} bytes`;
+    };
+
+    document.getElementById('btnConnect').onclick = () => {
+      const url = document.getElementById('url').value;
+      ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        log(`연결됨: ${url}`, 'ok');
+        document.getElementById('btnConnect').disabled = true;
+        document.getElementById('btnDisconnect').disabled = false;
+        document.getElementById('btnMic').disabled = false;
+      };
+
+      ws.onclose = (e) => {
+        log(`연결 종료 (code: ${e.code})`, 'error');
+        document.getElementById('btnConnect').disabled = false;
+        document.getElementById('btnDisconnect').disabled = true;
+        document.getElementById('btnMic').disabled = true;
+        document.getElementById('btnStop').disabled = true;
+        stopMic();
+      };
+
+      ws.onerror = () => log('WebSocket 오류', 'error');
+
+      log(`연결 중: ${url}`);
+    };
+
+    document.getElementById('btnDisconnect').onclick = () => {
+      ws && ws.close();
+    };
+
+    document.getElementById('btnMic').onclick = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        // 16kHz, mono로 AudioContext 생성
+        audioCtx = new AudioContext({ sampleRate: 16000 });
+        source = audioCtx.createMediaStreamSource(stream);
+
+        // 4096 샘플 단위로 처리 (= 256ms @ 16kHz)
+        processor = audioCtx.createScriptProcessor(4096, 1, 1);
+        source.connect(processor);
+        processor.connect(audioCtx.destination);
+
+        processor.onaudioprocess = (e) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+          const float32 = e.inputBuffer.getChannelData(0);
+
+          // Float32 → PCM Int16 변환
+          const pcm = new Int16Array(float32.length);
+          for (let i = 0; i < float32.length; i++) {
+            pcm[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+          }
+
+          ws.send(pcm.buffer);
+          chunkCount++;
+          totalBytes += pcm.buffer.byteLength;
+          updateStats();
+          log(`청크 전송: ${pcm.buffer.byteLength} bytes (샘플 ${float32.length}개)`, 'chunk');
+        };
+
+        document.getElementById('btnMic').disabled = true;
+        document.getElementById('btnStop').disabled = false;
+        log('마이크 시작 — PCM 16bit 16kHz Mono 전송 중', 'ok');
+      } catch (err) {
+        log(`마이크 오류: ${err.message}`, 'error');
+      }
+    };
+
+    document.getElementById('btnStop').onclick = stopMic;
+
+    function stopMic() {
+      if (processor) { processor.disconnect(); processor = null; }
+      if (source)    { source.disconnect();    source = null; }
+      if (audioCtx)  { audioCtx.close();       audioCtx = null; }
+      document.getElementById('btnMic').disabled = false;
+      document.getElementById('btnStop').disabled = true;
+      log('마이크 중지');
+    }
+  </script>
+</body>
+</html>
