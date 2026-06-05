@@ -67,6 +67,12 @@ func (h *Handler) readLoop(sess *Session) {
 		h.mu.Unlock()
 
 		log.Printf("[%s] disconnected (active: %d)", sess.ID, h.activeCount())
+
+		if h.audioHandler != nil {
+			if closer, ok := h.audioHandler.(interface{ OnSessionClose(string) }); ok {
+				closer.OnSessionClose(sess.ID)
+			}
+		}
 	}()
 
 	for {

@@ -4,6 +4,7 @@ import (
 	"log"
 
 	"github.com/Hyuk-II/todai-middleware/internal/config"
+	"github.com/Hyuk-II/todai-middleware/internal/orchestrator"
 	"github.com/Hyuk-II/todai-middleware/internal/queue"
 	"github.com/Hyuk-II/todai-middleware/internal/slowtrack"
 	"github.com/Hyuk-II/todai-middleware/internal/websocket"
@@ -20,7 +21,8 @@ func main() {
 
 	topology := queue.NewTopology(cfg.RabbitMQEmotionQ, cfg.RabbitMQSTTQ)
 	queueClient, err := queue.NewClient(cfg.RabbitMQURL, topology)
-	var audioHandler websocket.AudioChunkHandler
+
+	var utterancePublisher orchestrator.UtterancePublisher
 	if err != nil {
 		log.Printf("rabbitmq unavailable, slow track publish disabled: %v", err)
 	} else {
@@ -29,10 +31,13 @@ func main() {
 				log.Printf("rabbitmq close failed: %v", err)
 			}
 		}()
-		publisher := queue.NewPublisher(queueClient)
-		audioHandler = slowtrack.NewService(publisher)
+		utterancePublisher = slowtrack.NewService(queue.NewPublisher(queueClient))
 		log.Printf("rabbitmq connected | emotion_queue=%s stt_queue=%s", cfg.RabbitMQEmotionQ, cfg.RabbitMQSTTQ)
 	}
+
+	// orchestrator는 RabbitMQ 없이도 항상 동작 (VAD + 버퍼링)
+	// utterancePublisher가 nil이면 발화 감지만 하고 publish는 스킵
+	audioHandler := orchestrator.NewService(utterancePublisher)
 
 	r := gin.Default()
 

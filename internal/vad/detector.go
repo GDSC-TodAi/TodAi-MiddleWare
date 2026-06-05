@@ -8,7 +8,7 @@ import (
 const (
 	DefaultSampleRateHz      = 16000
 	DefaultSilenceDurationMs = 1500
-	DefaultRMSThreshold      = 500
+	DefaultRMSThreshold      = 100
 )
 
 // Detector is a minimal PCM 16-bit mono VAD for wiring the utterance boundary.
@@ -67,6 +67,9 @@ func durationMs(chunk []byte, sampleRateHz int) int {
 
 	return samples * 1000 / sampleRateHz
 }
+
+// RMS returns the root mean square energy of a PCM 16-bit little-endian chunk.
+func RMS(chunk []byte) float64 { return rms16LE(chunk) }
 
 func rms16LE(chunk []byte) float64 {
 	sampleCount := len(chunk) / 2
