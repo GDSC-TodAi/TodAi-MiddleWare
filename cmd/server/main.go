@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"log"
 
+	"github.com/Hyuk-II/todai-middleware/internal/aggregator"
+	"github.com/Hyuk-II/todai-middleware/internal/backend"
 	"github.com/Hyuk-II/todai-middleware/internal/config"
 	"github.com/Hyuk-II/todai-middleware/internal/orchestrator"
 	"github.com/Hyuk-II/todai-middleware/internal/queue"
@@ -18,8 +21,14 @@ func main() {
 	}
 
 	cfg := config.Load()
+	backendClient := backend.NewClient(cfg.BackendBaseURL, cfg.BackendRequestTimeout)
+	if backendClient.Enabled() {
+		log.Printf("backend integration enabled | base_url=%s", cfg.BackendBaseURL)
+	} else {
+		log.Printf("backend integration disabled")
+	}
 
-	topology := queue.NewTopology(cfg.RabbitMQEmotionQ, cfg.RabbitMQSTTQ)
+	topology := queue.NewTopology(cfg.RabbitMQEmotionQ, cfg.RabbitMQSTTQ, cfg.RabbitMQReplyQ)
 	queueClient, err := queue.NewClient(cfg.RabbitMQURL, topology)
 
 	var utterancePublisher orchestrator.UtterancePublisher
@@ -31,8 +40,54 @@ func main() {
 				log.Printf("rabbitmq close failed: %v", err)
 			}
 		}()
-		utterancePublisher = slowtrack.NewService(queue.NewPublisher(queueClient))
-		log.Printf("rabbitmq connected | emotion_queue=%s stt_queue=%s", cfg.RabbitMQEmotionQ, cfg.RabbitMQSTTQ)
+
+		var finalStatusHandler aggregator.FinalStatusHandler
+		if backendClient.Enabled() {
+			finalStatusHandler = func(ctx context.Context, result aggregator.FinalResult) error {
+				return backendClient.UpdateJobStatus(
+					ctx,
+					result.JobID,
+					backend.UpdateJobStatusRequest{
+						Status:        result.Status,
+						CorrelationID: result.CorrelationID,
+						Message:       result.Message,
+					},
+				)
+			}
+		}
+		agg := aggregator.NewService(aggregator.DefaultTimeout, finalStatusHandler)
+		defer agg.Close()
+
+		replyConsumer, consumerErr := queue.NewConsumer(queueClient, topology)
+		if consumerErr != nil {
+			log.Printf("reply consumer unavailable: %v", consumerErr)
+		} else {
+			defer func() {
+				if err := replyConsumer.Close(); err != nil {
+					log.Printf("reply consumer close failed: %v", err)
+				}
+			}()
+			consumerCtx, cancelConsumer := context.WithCancel(context.Background())
+			defer cancelConsumer()
+			go func() {
+				if err := replyConsumer.ConsumeReplies(consumerCtx, agg.HandleWorkerResponse); err != nil {
+					log.Printf("reply consumer stopped: %v", err)
+				}
+			}()
+		}
+
+		utterancePublisher = slowtrack.NewService(
+			queue.NewPublisher(queueClient),
+			backendClient,
+			cfg.RabbitMQReplyQ,
+			cfg.RabbitMQPublishTimeout,
+		)
+		log.Printf(
+			"rabbitmq connected | emotion_queue=%s stt_queue=%s reply_queue=%s",
+			cfg.RabbitMQEmotionQ,
+			cfg.RabbitMQSTTQ,
+			cfg.RabbitMQReplyQ,
+		)
 	}
 
 	// orchestrator는 RabbitMQ 없이도 항상 동작 (VAD + 버퍼링)
@@ -50,6 +105,8 @@ func main() {
 
 	log.Printf("todai-middleware starting on :%s", cfg.Port)
 	if err := r.Run(":" + cfg.Port); err != nil {
-		log.Fatalf("server error: %v", err)
+		// Return from main normally so deferred RabbitMQ cleanup can run.
+		log.Printf("server error: %v", err)
+		return
 	}
 }

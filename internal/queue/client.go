@@ -14,10 +14,6 @@ type Client struct {
 }
 
 func NewClient(url string, topology Topology) (*Client, error) {
-	if url == "" {
-		url = DefaultRabbitMQURL
-	}
-
 	conn, err := amqp.Dial(url)
 	if err != nil {
 		return nil, fmt.Errorf("connect rabbitmq: %w", err)
@@ -43,7 +39,7 @@ func NewClient(url string, topology Topology) (*Client, error) {
 }
 
 func (c *Client) DeclareQueues() error {
-	for _, queueName := range c.topology.WorkerQueues() {
+	for _, queueName := range c.topology.Queues() {
 		if _, err := c.channel.QueueDeclare(
 			queueName,
 			true,  // durable
