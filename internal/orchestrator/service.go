@@ -13,7 +13,7 @@ const rmsLogInterval = 20 // 청크 N개마다 RMS 로그 출력 (캘리브레�
 
 // UtterancePublisher handles a complete spoken utterance for background analysis.
 type UtterancePublisher interface {
-	PublishUtterance(ctx context.Context, sessionID string, audioData []byte)
+	PublishUtterance(ctx context.Context, sessionID string, audioData []byte) error
 }
 
 // Service buffers audio per session, runs VAD, and fires the slow track once per utterance.
@@ -60,7 +60,15 @@ func (s *Service) HandleAudioChunk(ctx context.Context, sessionID string, audioD
 
 	log.Printf("[%s] utterance end detected | %d bytes → slow track", sessionID, len(utterance))
 	if s.publisher != nil {
-		go s.publisher.PublishUtterance(context.WithoutCancel(ctx), sessionID, utterance)
+		go func() {
+			if err := s.publisher.PublishUtterance(
+				context.WithoutCancel(ctx),
+				sessionID,
+				utterance,
+			); err != nil {
+				log.Printf("[%s] slow track failed: %v", sessionID, err)
+			}
+		}()
 	}
 }
 

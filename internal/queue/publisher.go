@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 
+	"github.com/Hyuk-II/todai-middleware/pkg/model"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -23,23 +25,61 @@ func NewPublisher(client *Client) *Publisher {
 	}
 }
 
-func (p *Publisher) PublishEmotion(ctx context.Context, payload any) error {
-	return p.publish(ctx, p.topology.EmotionQueue, payload)
+func (p *Publisher) PublishEmotion(ctx context.Context, req model.WorkerRequest) error {
+	if req.WorkerType != model.WorkerTypeEmotion {
+		return fmt.Errorf("publish emotion request: invalid worker_type %q", req.WorkerType)
+	}
+	return p.publish(ctx, p.topology.EmotionQueue, req)
 }
 
-func (p *Publisher) PublishSTT(ctx context.Context, payload any) error {
-	return p.publish(ctx, p.topology.STTQueue, payload)
+func (p *Publisher) PublishSTT(ctx context.Context, req model.WorkerRequest) error {
+	if req.WorkerType != model.WorkerTypeSTT {
+		return fmt.Errorf("publish stt request: invalid worker_type %q", req.WorkerType)
+	}
+	return p.publish(ctx, p.topology.STTQueue, req)
 }
 
-func (p *Publisher) PublishToWorkers(ctx context.Context, payload any) error {
-	if err := p.PublishEmotion(ctx, payload); err != nil {
-		return err
-	}
-	if err := p.PublishSTT(ctx, payload); err != nil {
-		return err
+func (p *Publisher) PublishToWorkers(
+	ctx context.Context,
+	emotionReq model.WorkerRequest,
+	sttReq model.WorkerRequest,
+) (error, error) {
+	// Both workers are attempted independently so one queue failure does not
+	// prevent the other worker from receiving the job.
+	emotionErr := p.PublishEmotion(ctx, emotionReq)
+	if emotionErr != nil {
+		log.Printf(
+			"emotion publish failed | job_id=%s correlation_id=%s error=%v",
+			emotionReq.JobID,
+			emotionReq.CorrelationID,
+			emotionErr,
+		)
+	} else {
+		log.Printf(
+			"emotion publish succeeded | job_id=%s correlation_id=%s",
+			emotionReq.JobID,
+			emotionReq.CorrelationID,
+		)
 	}
 
-	return nil
+	sttErr := p.PublishSTT(ctx, sttReq)
+	if sttErr != nil {
+		log.Printf(
+			"stt publish failed | job_id=%s correlation_id=%s error=%v",
+			sttReq.JobID,
+			sttReq.CorrelationID,
+			sttErr,
+		)
+	} else {
+		log.Printf(
+			"stt publish succeeded | job_id=%s correlation_id=%s",
+			sttReq.JobID,
+			sttReq.CorrelationID,
+		)
+	}
+
+	// TODO: Record each publish outcome in job_event_history when DB integration is added.
+	return emotionErr, sttErr
 }
 
 func (p *Publisher) publish(ctx context.Context, queueName string, payload any) error {
