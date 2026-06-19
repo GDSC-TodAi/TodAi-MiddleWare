@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -94,6 +95,22 @@ func (h *Handler) readLoop(sess *Session) {
 			h.audioHandler.HandleAudioChunk(context.Background(), sess.ID, data)
 		}
 	}
+}
+
+// SetAudioHandler sets the audio handler after construction (used to break init cycle).
+func (h *Handler) SetAudioHandler(ah AudioChunkHandler) {
+	h.audioHandler = ah
+}
+
+// SendAudioToSession sends a binary audio frame to the specified session.
+func (h *Handler) SendAudioToSession(sessionID string, audio []byte) error {
+	h.mu.RLock()
+	sess, ok := h.sessions[sessionID]
+	h.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session %s not found or disconnected", sessionID)
+	}
+	return sess.Send(audio)
 }
 
 func (h *Handler) activeCount() int {

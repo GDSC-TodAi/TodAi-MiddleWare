@@ -2,6 +2,7 @@ package aggregator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -43,6 +44,10 @@ type FinalResult struct {
 	Status        string
 	Message       string
 	WorkerType    string
+
+	// Parsed worker results — nil/empty if the worker failed or timed out.
+	EmotionResult *model.EmotionResult
+	STTText       string
 }
 
 type FinalStatusHandler func(ctx context.Context, result FinalResult) error
@@ -240,7 +245,7 @@ func arrivedWorkerTypes(state *JobState) string {
 }
 
 func newFinalResult(state *JobState, status, workerType string) FinalResult {
-	return FinalResult{
+	result := FinalResult{
 		JobID:         state.JobID,
 		SessionID:     state.SessionID,
 		ElderID:       state.ElderID,
@@ -249,6 +254,19 @@ func newFinalResult(state *JobState, status, workerType string) FinalResult {
 		Message:       statusMessage(status),
 		WorkerType:    workerType,
 	}
+	if state.EmotionResult != nil && state.EmotionResult.Status == model.WorkerStatusSuccess {
+		var e model.EmotionResult
+		if err := json.Unmarshal(state.EmotionResult.Result, &e); err == nil {
+			result.EmotionResult = &e
+		}
+	}
+	if state.STTResult != nil && state.STTResult.Status == model.WorkerStatusSuccess {
+		var s model.STTResult
+		if err := json.Unmarshal(state.STTResult.Result, &s); err == nil {
+			result.STTText = s.Text
+		}
+	}
+	return result
 }
 
 func statusMessage(status string) string {

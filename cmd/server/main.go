@@ -4,12 +4,17 @@ import (
 	"context"
 	"log"
 
+	"github.com/Hyuk-II/todai-middleware/internal/adk"
 	"github.com/Hyuk-II/todai-middleware/internal/aggregator"
 	"github.com/Hyuk-II/todai-middleware/internal/backend"
 	"github.com/Hyuk-II/todai-middleware/internal/config"
+	"github.com/Hyuk-II/todai-middleware/internal/fasttrack"
+	"github.com/Hyuk-II/todai-middleware/internal/llm"
 	"github.com/Hyuk-II/todai-middleware/internal/orchestrator"
 	"github.com/Hyuk-II/todai-middleware/internal/queue"
 	"github.com/Hyuk-II/todai-middleware/internal/slowtrack"
+	"github.com/Hyuk-II/todai-middleware/internal/stt"
+	"github.com/Hyuk-II/todai-middleware/internal/tts"
 	"github.com/Hyuk-II/todai-middleware/internal/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -21,6 +26,8 @@ func main() {
 	}
 
 	cfg := config.Load()
+
+	// ── Spring Backend client ──────────────────────────────────────────────
 	backendClient := backend.NewClient(cfg.BackendBaseURL, cfg.BackendRequestTimeout)
 	if backendClient.Enabled() {
 		log.Printf("backend integration enabled | base_url=%s", cfg.BackendBaseURL)
@@ -28,6 +35,28 @@ func main() {
 		log.Printf("backend integration disabled")
 	}
 
+	// ── ADK client ────────────────────────────────────────────────────────
+	adkClient := adk.NewClient(cfg.ADKBaseURL, cfg.ADKTimeout)
+	if adkClient.Enabled() {
+		log.Printf("adk enabled | base_url=%s", cfg.ADKBaseURL)
+	} else {
+		log.Printf("adk disabled (ADK_BASE_URL not set)")
+	}
+
+	// ── Fast Track clients ────────────────────────────────────────────────
+	sttClient := stt.NewClient(cfg.STTBaseURL, cfg.STTTimeout)
+	llmClient := llm.NewClient(cfg.LLMBaseURL, cfg.LLMModel, cfg.LLMTimeout)
+	ttsClient := tts.NewClient(cfg.TTSBaseURL, cfg.TTSTimeout)
+	log.Printf("fast track | stt=%v llm=%v tts=%v",
+		sttClient.Enabled(), llmClient.Enabled(), ttsClient.Enabled())
+
+	// ── WebSocket handler (audio handler set after orchestrator is built) ──
+	wsHandler := websocket.NewHandler(nil)
+
+	// ── Fast Track service ────────────────────────────────────────────────
+	fastTrackSvc := fasttrack.NewService(sttClient, llmClient, ttsClient, wsHandler, cfg.FastTrackTimeout)
+
+	// ── RabbitMQ + Slow Track ─────────────────────────────────────────────
 	topology := queue.NewTopology(cfg.RabbitMQEmotionQ, cfg.RabbitMQSTTQ, cfg.RabbitMQReplyQ)
 	queueClient, err := queue.NewClient(cfg.RabbitMQURL, topology)
 
@@ -41,20 +70,9 @@ func main() {
 			}
 		}()
 
-		var finalStatusHandler aggregator.FinalStatusHandler
-		if backendClient.Enabled() {
-			finalStatusHandler = func(ctx context.Context, result aggregator.FinalResult) error {
-				return backendClient.UpdateJobStatus(
-					ctx,
-					result.JobID,
-					backend.UpdateJobStatusRequest{
-						Status:        result.Status,
-						CorrelationID: result.CorrelationID,
-						Message:       result.Message,
-					},
-				)
-			}
-		}
+		// Aggregator finalizes when both workers reply (or timeout).
+		// After finalization: update Spring status + call ADK for 5 metrics.
+		finalStatusHandler := buildFinalStatusHandler(backendClient, adkClient)
 		agg := aggregator.NewService(aggregator.DefaultTimeout, finalStatusHandler)
 		defer agg.Close()
 
@@ -90,23 +108,66 @@ func main() {
 		)
 	}
 
-	// orchestrator는 RabbitMQ 없이도 항상 동작 (VAD + 버퍼링)
-	// utterancePublisher가 nil이면 발화 감지만 하고 publish는 스킵
-	audioHandler := orchestrator.NewService(utterancePublisher)
+	// ── Orchestrator: VAD + fan-out to both tracks ─────────────────────────
+	audioHandler := orchestrator.NewService(utterancePublisher, fastTrackSvc)
+	wsHandler.SetAudioHandler(audioHandler)
 
+	// ── HTTP routes ───────────────────────────────────────────────────────
 	r := gin.Default()
-
-	wsHandler := websocket.NewHandler(audioHandler)
 	r.GET("/ws", wsHandler.ServeHTTP)
-
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
 	log.Printf("todai-middleware starting on :%s", cfg.Port)
 	if err := r.Run(":" + cfg.Port); err != nil {
-		// Return from main normally so deferred RabbitMQ cleanup can run.
 		log.Printf("server error: %v", err)
-		return
+	}
+}
+
+// buildFinalStatusHandler returns a handler that (1) updates Spring Backend status
+// and (2) calls ADK for 5 welfare metrics when worker results are available.
+func buildFinalStatusHandler(
+	backendClient *backend.Client,
+	adkClient *adk.Client,
+) aggregator.FinalStatusHandler {
+	return func(ctx context.Context, result aggregator.FinalResult) error {
+		// 1. Update Spring Backend job status.
+		if backendClient.Enabled() {
+			if err := backendClient.UpdateJobStatus(
+				ctx,
+				result.JobID,
+				backend.UpdateJobStatusRequest{
+					Status:        result.Status,
+					CorrelationID: result.CorrelationID,
+					Message:       result.Message,
+				},
+			); err != nil {
+				log.Printf("[%s] backend status update failed: %v", result.CorrelationID, err)
+			}
+		}
+
+		// 2. Call ADK when both worker results are available.
+		if adkClient.Enabled() && result.EmotionResult != nil && result.STTText != "" {
+			adkCtx, cancel := context.WithTimeout(ctx, adkClient.Timeout())
+			defer cancel()
+
+			metrics, err := adkClient.Analyze(adkCtx, *result.EmotionResult, result.STTText)
+			if err != nil {
+				log.Printf("[%s] adk analysis failed: %v", result.CorrelationID, err)
+			} else {
+				log.Printf(
+					"[%s] adk metrics | social_isolation=%.2f health_anxiety=%.2f daily_vitality=%.2f emotion_variance=%.2f cognitive_load=%.2f",
+					result.CorrelationID,
+					metrics.SocialIsolation,
+					metrics.HealthAnxiety,
+					metrics.DailyVitality,
+					metrics.EmotionVariance,
+					metrics.CognitiveLoad,
+				)
+			}
+		}
+
+		return nil
 	}
 }

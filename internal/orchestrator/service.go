@@ -16,28 +16,36 @@ type UtterancePublisher interface {
 	PublishUtterance(ctx context.Context, sessionID string, audioData []byte) error
 }
 
-// Service buffers audio per session, runs VAD, and fires the slow track once per utterance.
+// FastTracker runs the real-time STT → LLM → TTS pipeline and sends audio back to the session.
+type FastTracker interface {
+	Run(ctx context.Context, sessionID string, audio []byte)
+	Enabled() bool
+}
+
+// Service buffers audio per session, runs VAD, and fires both tracks once per utterance.
 type Service struct {
-	mu        sync.Mutex
-	sessions  map[string]*sessionState
-	publisher UtterancePublisher
+	mu          sync.Mutex
+	sessions    map[string]*sessionState
+	publisher   UtterancePublisher
+	fastTracker FastTracker
 }
 
 type sessionState struct {
-	vad       *vad.Detector
-	buf       bytes.Buffer
+	vad        *vad.Detector
+	buf        bytes.Buffer
 	chunkCount int
 }
 
-func NewService(publisher UtterancePublisher) *Service {
+func NewService(publisher UtterancePublisher, fastTracker FastTracker) *Service {
 	return &Service{
-		sessions:  make(map[string]*sessionState),
-		publisher: publisher,
+		sessions:    make(map[string]*sessionState),
+		publisher:   publisher,
+		fastTracker: fastTracker,
 	}
 }
 
 // HandleAudioChunk implements websocket.AudioChunkHandler.
-// Each chunk is buffered and passed to VAD. On utterance end, the full audio is published.
+// Each chunk is buffered and passed to VAD. On utterance end, both tracks are started concurrently.
 func (s *Service) HandleAudioChunk(ctx context.Context, sessionID string, audioData []byte) {
 	s.mu.Lock()
 	state := s.getOrCreate(sessionID)
@@ -58,14 +66,17 @@ func (s *Service) HandleAudioChunk(ctx context.Context, sessionID string, audioD
 	utterance := append([]byte(nil), state.buf.Bytes()...)
 	state.buf.Reset()
 
-	log.Printf("[%s] utterance end detected | %d bytes → slow track", sessionID, len(utterance))
+	log.Printf("[%s] utterance end detected | %d bytes → fast+slow track", sessionID, len(utterance))
+
+	noCancel := context.WithoutCancel(ctx)
+
+	if s.fastTracker != nil && s.fastTracker.Enabled() {
+		go s.fastTracker.Run(noCancel, sessionID, utterance)
+	}
+
 	if s.publisher != nil {
 		go func() {
-			if err := s.publisher.PublishUtterance(
-				context.WithoutCancel(ctx),
-				sessionID,
-				utterance,
-			); err != nil {
+			if err := s.publisher.PublishUtterance(noCancel, sessionID, utterance); err != nil {
 				log.Printf("[%s] slow track failed: %v", sessionID, err)
 			}
 		}()
