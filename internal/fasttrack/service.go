@@ -95,7 +95,9 @@ func (s *Service) Run(ctx context.Context, sessionID string, audio []byte) {
 		log.Printf("[%s] fast track TTS returned empty audio, skipping", sessionID)
 		return
 	}
+	log.Printf("[%s] fast track TTS | %d bytes elapsed=%dms", sessionID, len(audioOut), time.Since(start).Milliseconds())
 
+	log.Printf("[%s] fast track sending audio to session...", sessionID)
 	if err := s.sender.SendAudioToSession(sessionID, audioOut); err != nil {
 		log.Printf("[%s] fast track send failed: %v", sessionID, err)
 		return
