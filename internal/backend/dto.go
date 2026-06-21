@@ -2,8 +2,9 @@ package backend
 
 const (
 	EventTypePublishStarted = "PUBLISH_STARTED"
-	EventTypePublished      = "PUBLISHED"
-	EventTypePublishFailed  = "PUBLISH_FAILED"
+	// 백엔드 AnalysisJobEventType enum 의 정식 값은 PUBLISH_SUCCESS 다("PUBLISHED" 아님).
+	EventTypePublished     = "PUBLISH_SUCCESS"
+	EventTypePublishFailed = "PUBLISH_FAILED"
 )
 
 type CreateAnalysisJobRequest struct {
