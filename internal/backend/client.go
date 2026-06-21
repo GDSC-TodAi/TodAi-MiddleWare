@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const maxErrorBodyBytes = 4096
+const (
+	maxErrorBodyBytes = 4096
+	analysisJobsPath  = "/api/internal/analysis-jobs"
+)
 
 type Client struct {
 	baseURL    string
@@ -41,7 +44,7 @@ func (c *Client) CreateAnalysisJob(
 		return response, fmt.Errorf("backend integration is disabled")
 	}
 
-	if err := c.doJSON(ctx, http.MethodPost, "/internal/analysis-jobs", req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, analysisJobsPath, req, &response); err != nil {
 		return response, err
 	}
 	if response.JobID == "" {
@@ -55,7 +58,7 @@ func (c *Client) CreateJobEvent(
 	jobID string,
 	req CreateJobEventRequest,
 ) error {
-	path := "/internal/analysis-jobs/" + url.PathEscape(jobID) + "/events"
+	path := analysisJobsPath + "/" + url.PathEscape(jobID) + "/events"
 	return c.doJSON(ctx, http.MethodPost, path, req, nil)
 }
 
@@ -64,8 +67,21 @@ func (c *Client) UpdateJobStatus(
 	jobID string,
 	req UpdateJobStatusRequest,
 ) error {
-	path := "/internal/analysis-jobs/" + url.PathEscape(jobID) + "/status"
+	path := analysisJobsPath + "/" + url.PathEscape(jobID) + "/status"
 	return c.doJSON(ctx, http.MethodPatch, path, req, nil)
+}
+
+func (c *Client) SaveAnalysisResult(
+	ctx context.Context,
+	jobID string,
+	req SaveAnalysisResultRequest,
+) (*SaveAnalysisResultResponse, error) {
+	var response SaveAnalysisResultResponse
+	path := analysisJobsPath + "/" + url.PathEscape(jobID) + "/result"
+	if err := c.doJSON(ctx, http.MethodPost, path, req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
 }
 
 func (c *Client) doJSON(

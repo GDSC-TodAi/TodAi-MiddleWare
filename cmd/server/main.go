@@ -125,8 +125,8 @@ func main() {
 	}
 }
 
-// buildFinalStatusHandler returns a handler that (1) updates Spring Backend status
-// and (2) calls ADK for 5 welfare metrics when worker results are available.
+// buildFinalStatusHandler returns a handler that updates Spring status, evaluates
+// ADK success/failure/skipped state, and saves the final analysis result.
 func buildFinalStatusHandler(
 	backendClient *backend.Client,
 	adkClient *adk.Client,
@@ -147,6 +147,8 @@ func buildFinalStatusHandler(
 			}
 		}
 
+		saveReq := newSaveAnalysisResultRequest(result)
+
 		// 2. Call ADK when both worker results are available.
 		if adkClient.Enabled() && result.EmotionResult != nil && result.STTText != "" {
 			adkCtx, cancel := context.WithTimeout(ctx, adkClient.Timeout())
@@ -155,7 +157,13 @@ func buildFinalStatusHandler(
 			metrics, err := adkClient.Analyze(adkCtx, *result.EmotionResult, result.STTText)
 			if err != nil {
 				log.Printf("[%s] adk analysis failed: %v", result.CorrelationID, err)
+				saveReq.ADKStatus = backend.ADKStatusFailed
+				saveReq.ADKErrorReason = stringPtr(err.Error())
+				saveReq.AnalysisStatus = analysisStatus(result.Status, saveReq.ADKStatus)
 			} else {
+				saveReq.ADKStatus = backend.ADKStatusSuccess
+				saveReq.AnalysisStatus = analysisStatus(result.Status, saveReq.ADKStatus)
+				saveReq.Metrics = metricPayload(metrics)
 				log.Printf(
 					"[%s] adk metrics | social_isolation=%.2f health_anxiety=%.2f daily_vitality=%.2f emotion_variance=%.2f cognitive_load=%.2f",
 					result.CorrelationID,
@@ -168,6 +176,72 @@ func buildFinalStatusHandler(
 			}
 		}
 
+		// 3. Persist final result when Backend integration is enabled.
+		if backendClient.Enabled() {
+			if _, err := backendClient.SaveAnalysisResult(ctx, result.JobID, saveReq); err != nil {
+				log.Printf("[%s] backend result save failed: %v", result.CorrelationID, err)
+			}
+		}
+
 		return nil
 	}
+}
+
+func newSaveAnalysisResultRequest(result aggregator.FinalResult) backend.SaveAnalysisResultRequest {
+	req := backend.SaveAnalysisResultRequest{
+		SessionID:      result.SessionID,
+		ElderID:        result.ElderID,
+		CorrelationID:  result.CorrelationID,
+		JobStatus:      result.Status,
+		AnalysisStatus: analysisStatus(result.Status, backend.ADKStatusSkipped),
+		ADKStatus:      backend.ADKStatusSkipped,
+		ErrorReason:    errorReason(result.Status),
+	}
+	if result.STTText != "" {
+		req.STTText = stringPtr(result.STTText)
+	}
+	return req
+}
+
+func metricPayload(metrics adk.MetricsResult) *backend.MetricPayload {
+	return &backend.MetricPayload{
+		SocialIsolation: metrics.SocialIsolation,
+		HealthAnxiety:   metrics.HealthAnxiety,
+		DailyVitality:   metrics.DailyVitality,
+		EmotionVariance: metrics.EmotionVariance,
+		CognitiveLoad:   metrics.CognitiveLoad,
+	}
+}
+
+func analysisStatus(jobStatus string, adkStatus string) string {
+	if jobStatus == aggregator.StatusCompleted && adkStatus == backend.ADKStatusSuccess {
+		return backend.AnalysisStatusSuccess
+	}
+	switch jobStatus {
+	case aggregator.StatusFailed, aggregator.StatusTimeout:
+		return backend.AnalysisStatusFailed
+	default:
+		return backend.AnalysisStatusPartial
+	}
+}
+
+func errorReason(jobStatus string) *string {
+	var reason string
+	switch jobStatus {
+	case aggregator.StatusPartialFailed:
+		reason = "one or more workers failed"
+	case aggregator.StatusPartialTimeout:
+		reason = "one or more workers timed out"
+	case aggregator.StatusFailed:
+		reason = "all workers failed"
+	case aggregator.StatusTimeout:
+		reason = "all workers timed out"
+	default:
+		return nil
+	}
+	return &reason
+}
+
+func stringPtr(value string) *string {
+	return &value
 }
